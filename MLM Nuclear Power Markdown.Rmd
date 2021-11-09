@@ -1,0 +1,172 @@
+---
+title: "575 Final Project - Concern for Nuclear Power around the World"
+author: "Joshua Inwald"
+date: "Sys.Date()"
+output: html_document
+---
+
+```{r setup, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(psych)
+library(lme4)
+library(lmerTest)
+library(simr)
+library(psych)
+library(GPArotation)
+library(multilevel)
+library(mediation)
+library(MuMIn)
+library(sjstats)
+library(usethis)
+library(wCorr)
+library(modelsummary)
+use_git_config(user.name="JoshuaInwald", user.email = "inwald@usc.edu")
+setwd("~/Documents/Lloyd's World Risk Survey")
+```
+
+## Project Overview
+
+In this project, I run analyses on a global dataset to understand how concern for nuclear power varies around the globe. What types of people are most afraid of nuclear power? What factors predict concern for nuclear power? How do these factors vary across countries? A few hypotheses include:
+
+* People in developing countries will be most in-favor of nuclear power (they have the most to gain), whereas people in developed countries will be most afraid of nuclear power (rich countries tend to have stronger Green movements)
+* People who are generally worried about other things in life, or who don't trust their governments, will also be worried about nuclear power
+
+```{r import+clean+prep data, message=FALSE}
+#Read in data
+mydata <- read.table("lrf_public_file_review.tab", header = TRUE, fill = TRUE, sep = "\t")
+
+# Nuclear power concern DV trinary recode-ing
+mydata <- mydata %>%
+  mutate(NukeOptimism = if_else((L4B == 4 | L4B == 98 | L4B == 99),"0",  #Treats the "neither" + "don't know" + "don't have an opinion" folks as zeros, vs N/As
+                       if_else((L4B == 3),"0",
+                       if_else((L4B == 2),"-1", "1"))))
+mydata$NukeOptimism <- as.numeric(mydata$NukeOptimism)
+
+# Other big-picture trends concern IVs trinary recode-ing
+mydata <- mydata %>% #GMOs
+  mutate(GMOOptimism = if_else((L4A == 4 | L4A == 98 | L4A == 99),"0",
+                       if_else((L4A == 3),"0",
+                       if_else((L4A == 2),"-1", "1"))))
+mydata$GMOOptimism <- as.numeric(mydata$GMOOptimism)
+
+mydata <- mydata %>% #AI
+  mutate(AIOptimism = if_else((L4C == 4 | L4C == 98 | L4C == 99),"0",
+                       if_else((L4C == 3),"0",
+                       if_else((L4C == 2),"-1", "1"))))
+mydata$AIOptimism <- as.numeric(mydata$AIOptimism)
+
+mydata <- mutate(mydata, CCConcern = if_else((L5 == 3 | L5 == 98 | L5 == 99),0, 1)) #Climate Change, using a binary re-code
+mydata$CCConcern <- as.numeric(mydata$CCConcern)
+
+# "Mundane worries" binary recoding
+col_names <- colnames(mydata[24:44])
+for (i in col_names){
+  new_col_name <- paste0(i, "_B")
+  mydata <- mydata %>% 
+    mutate(!!sym(new_col_name) := case_when(!!as.name(i) == 1 ~ 1, !!as.name(i) == 2 ~ 1, TRUE ~ 0))
+}
+
+#Clean controls / other predictors (age, education, numeracy, social media use, belief that governments should regulate safety)
+mydata$Age <- as.numeric(ifelse(mydata$Age>99,NA,mydata$Age))
+mydata$Education <- as.numeric(ifelse(mydata$Education>3,NA,mydata$Education)) #Exclude I don't knows / did not responds
+mydata$Numeracy <- if_else((mydata$L12 == 3), 1,0)
+mydata$SMuse <- if_else((mydata$L26 == 1), 1,0)
+mydata$GovSafeReg <- if_else((mydata$L15 == 1), 1,0)
+
+# efficacy of government food/water/power lines safety regulations
+mydata$L16A <- if_else((mydata$L16A == 1), 1,0)
+mydata$L16B <- if_else((mydata$L16B == 1), 1,0)
+mydata$L16C <- if_else((mydata$L16C == 1), 1,0)
+```
+
+## Data Exploration
+
+```{r data exploration}
+# Let's start by looking at concern for nuclear power by country
+NukeOptimismTable <- mydata %>%
+  group_by(Country) %>%
+  summarise(mean = weighted.mean(NukeOptimism, projection_weight, na.rm = TRUE), n = n()) %>%
+  arrange(desc(mean))
+head(NukeOptimismTable, n=10) #Countries with highest percent of people who think nuclear power will HELP their country
+tail(NukeOptimismTable, n=10) #Countries with highest percent of people who think nuclear power will HARM their country
+
+# Do big-picture and/or mundane worries form reliable scales? What about beliefs in government safety efficacy?
+omega(m = mydata[c("GMOOptimism", "AIOptimism", "CCConcern")])  #Can't use survey weights, but overall the three big-picture items DO NOT seem to hang. alpha = 0.37, omega = 0.43
+
+omega(m = mydata[c(95:101)])  #Can't use survey weights, but overall the 7 mundane concern DO seem to form a scale. alpha = 0.76, omega = 0.81, all factors load at least 0.43 onto g. Let's sum and rename scale to MundaneWorryScore
+mydata <- mydata %>%
+  mutate(MundaneWorryScore = L6A_B + L6B_B + L6C_B + L6D_B + L6E_B + L6F_B + L6G_B)
+#describe(mydata$MundaneWorryScore)
+
+omega(m = mydata[c("L16A", "L16B", "L16C")]) #Beliefs in gov safety efficacy: alpha = 0.77, omega = 0.78 -- good enough for me
+mydata <- mydata %>%
+  mutate(GovSafeEff = L16A + L16B + L16C)
+#describe(mydata$GovSafeEff)
+
+# Let's country-mean center our belief-in-government-safety-efficacy and mundane worries scales
+mydata <- mydata %>% 
+  group_by(Country) %>%   # operate within countries
+  mutate(GovSafeEff_cm = mean(GovSafeEff),   # create cluster means
+         GovSafeEff_cmc = GovSafeEff - GovSafeEff_cm) %>%   # cluster-mean centered
+    mutate(MundaneWorryScore_cm = mean(MundaneWorryScore),   # create cluster means
+         MundaneWorryScore_cmc = MundaneWorryScore - MundaneWorryScore_cm) %>%   # cluster-mean centered
+      mutate(AIOptimism_cm = mean(AIOptimism),   # create cluster means
+         AIOptimism_cmc = AIOptimism - AIOptimism_cm) %>%   # cluster-mean centered
+  ungroup()  # exit the "editing within groups" mode
+
+# Do any of the big-picture concerns correlate with concern for nuclear power?
+weightedCorr(mydata$NukeOptimism,mydata$GMOOptimism, weights = mydata$projection_weight) #R of 0.24 for nuclear X GMO
+weightedCorr(mydata$NukeOptimism,mydata$AIOptimism, weights = mydata$projection_weight) #R of 0.27 for nuclear X AI
+weightedCorr(mydata$NukeOptimism,mydata$CCConcern, weights = mydata$projection_weight) #R of -0.11 for nuclear X Climate change. Interpretation -- the more afraid you are of climate change (i.e. high CCConern), the more you think that nuclear power is likely to HARM your country
+```
+
+Takeaways:
+* The countries most in-favor of nuclear power all seem quite poor / developing. The countries most afraid of nuclear power are mostly European / wealthier (though more Eastern/Southern, aka the less wealthy parts of the continent). I know that in those parts of the world, citizens are less trusting of their governments, so now I'm doubly excited to test the trust-in-government-safety scale
+* Interesting that optimism for nuclear power is negatively correlated with concern for climate change. If you're pro-nukes, you less likely to be concerned about climate change // if you're concerned about climate change, you're likely to be more pessimistic about nukes
+
+## Modeling
+
+Model equation (random intercepts only): 
+
+$$ NukeOptimism_{ij} = \beta_{0j} + \beta_{1j} * AIOptimism_{ij} + \beta_{2j} *MundaneWorryScore_{ij} + e_{ij} \\
+\beta_{0i} = \gamma_{00} + \gamma_{01}*AIOptimism_{cm} +\gamma_{02}*MundaneWorryScore_
+{cm}  + u_{0j} \\
+\beta_{1j} = \gamma_{10} \\
+\beta_{2j} = \gamma_{20}
+$$
+
+```{r model building, plot}
+#Let's start with an empty model of nuclear optimism -- using controls only
+m0 <- lmer(NukeOptimism ~ as.factor(INCOME_5) + Age + as.factor(Education) + as.factor(Gender) + (1 | Country), weights = projection_weight, data=mydata)
+#summary(m0)
+
+# Now let's add worry score predictor and AI optimism predictor
+m1 <- lmer(NukeOptimism ~ MundaneWorryScore_cm + MundaneWorryScore_cmc + AIOptimism_cm + AIOptimism_cmc  + as.factor(INCOME_5) + Age + as.factor(Education) + as.factor(Gender) + (1 | Country), weights = projection_weight, data=mydata)
+summary(m1)
+# The more worried you are, the less optimistic you'll be about nuclear power. Makes sense!
+
+# Let's get a pseudo-R-squared for this model -- how is it zero?
+MuMIn::r.squaredGLMM(m1)
+
+# Regardless, let's generate a table of coefficient outputs
+msummary(m1)
+```
+
+## Preliminary Findings -- Discussion
+
+While I'm excited to continue model-building off this dataset, there are some clear red flags off the bat.
+
+1. Based on an intraclass correlation coefficient (ICC) = 0 for nuclear optimism, it's suggesting that perhaps one's nationality doesn't have any bearing on your concern or optimism for nuclear electricity. This is making me re-think the need to use a multi-level model for this research question -- also how is it possible to get an ICC = 0? How can people's views on nuclear power not at all be similar to other people in their country? Perhaps this also relates to why the cluster-means regression betas are insignificant. Relatedly, with a pseudo-R-squared of zero (something else I've never seen before...), clearly something is up.
+
+2. That said, for the main predictors (mundane worries and AI optimism), I'm still getting significant effects that behave in the direction I would theoretically expect. People who are more generally worried about things (mundane worry score cmc) are more afraid of nuclear power (negative relationship, so higher worry -> more distrust in nuclear). Additionally, people who live in countries with more AI optimism (perhaps a proxy for comfort with new technologies in general? AIOptimism_cm) are more likely to believe nuclear power is a good thing, and people who are opptimistic about AI are more likely to also be optimistic about nuclear power (AIOptimism_cmc). The effects are of course small, reflecting the near-zero variance explained by the model, but thanks to the sample size they're at least significant!
+
+
+```{r plot}
+sjPlot::plot_model(m1, type = "pred", terms = "MundaneWorryScore_cmc", 
+                   show.data = TRUE, title = "", 
+                   dot.size = 0.5)
+```
+
+Not the best plot ever, but shows the (slight) negative relationship between a person's individual worry score and that person's optimism for nuclear power. Next steps for this chart would be to add country mean worry scores / nuclear optimism.
+
