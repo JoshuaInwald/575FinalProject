@@ -1,0 +1,525 @@
+---
+title: "575 Final Project - Global Optimism for Nuclear Power"
+author: "Joshua Inwald"
+date: "Sys.Date()"
+output: html_document
+---
+
+## Project Overview
+
+In this project, I run analyses on a global dataset to understand how concern for nuclear power varies around the globe. What types of people are most afraid of nuclear power? Do either concern for climate change or trust in one's government to effectively manage public safety (novel predictors) predict optimism vs pessimism for nuclear power? How do these factors vary across countries?
+
+```{r setup, message=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+#Load package libraries
+library(tidyverse)
+library(psych)
+library(lme4)
+library(lmerTest)
+library(simr)
+library(psych)
+library(GPArotation)
+library(multilevel)
+library(mediation)
+library(MuMIn)
+library(sjstats)
+library(usethis)
+library(wCorr)
+library(modelsummary)
+library(AICcmodavg)
+library(Rgraphviz)
+library(merTools)
+library(phantomjs)
+library(glmmTMB)
+library(brms)
+library(broom.mixed)
+library(htmlwidgets)
+library(lattice)
+use_git_config(user.name="JoshuaInwald", user.email = "inwald@usc.edu")
+setwd("~/Documents/Multilevel Modeling/575 Final Project")
+```
+
+```{r prep}
+####################################################################################################
+#Data prep and cleaning
+
+#Read in data
+mydata <- read.table("lrf_public_file_review.tab", header = TRUE, fill = TRUE, sep = "\t")
+
+# Nuclear power concern DV trinary recode-ing
+mydata <- mydata %>%
+  mutate(NukeOptimism = if_else((L4B == 4 | L4B == 98 | L4B == 99),"0",  #Treats the "neither" + "don't know" + "don't have an opinion" folks as zeros, vs N/As
+                                if_else((L4B == 3),"0",
+                                        if_else((L4B == 2),"-1", "1"))))
+mydata$NukeOptimism <- as.numeric(mydata$NukeOptimism)
+# Nuclear power concern DV binary recode-ing
+mydata <- mydata %>%
+  mutate(NukeBinary = if_else(NukeOptimism == 1,1,0))
+mydata$NukeBinary <- as.numeric(mydata$NukeBinary)
+
+# Research question 1: Demographic controls (age and education; gender, income quintiles and World Bank country income brackets are already okay)
+mydata$Age <- as.numeric(ifelse(mydata$Age>99,NA,mydata$Age))
+mydata$Education <- as.numeric(ifelse(mydata$Education>3,NA,mydata$Education)) #Exclude I don't knows / did not responds
+
+# Mutate variable to indicate countries with active civilian nuclear power plants in 2021
+NukeCountries <- c("Argentina", "Armenia", "Belarus", "Belgium", "Brazil", "Bulgaria", "Canada", "China", "Finland", 
+                   "France", "Germany", "Hungary", "India", "Iran", "Japan", "South Korea", "Mexico", "Netherlands", 
+                   "Pakistan", "Romania", "Russia", "Slovakia", "Slovenia", "South Africa", "Spain", "Sweden", 
+                   "Switzerland", "Taiwan", "Ukraine", "United Arab Emirates", "United Kingdom", "United States")
+mydata <- mydata %>%
+  mutate(NuclearCountry = if_else(mydata$Country %in% NukeCountries,1,0))
+mydata$NuclearCountry <- as.numeric(mydata$NuclearCountry)
+
+# Research question 2: Climate change recoding
+mydata <- mutate(mydata, CCConcern = if_else((L5 == 3 | L5 == 98 | L5 == 99),0, 1)) #Climate Change, using a binary re-code
+mydata$CCConcern <- as.numeric(mydata$CCConcern)
+
+# Research question 3: Belief in government safety regulations efficacy
+mydata$L16A <- if_else((mydata$L16A == 1), 1,0)
+mydata$L16B <- if_else((mydata$L16B == 1), 1,0)
+mydata$L16C <- if_else((mydata$L16C == 1), 1,0)
+omega(m = mydata[c("L16A", "L16B", "L16C")]) #Beliefs in gov safety efficacy: alpha = 0.77, omega = 0.78 
+mydata <- mydata %>%
+  mutate(GovSafeEff = L16A + L16B + L16C)
+```
+
+## RQ1
+
+```{r Q1models}
+#RQ 1 MODELING
+m0 <- lmer(NukeOptimism ~ Age + as.factor(Education) + as.factor(Gender) + (1 | Country), 
+           data=mydata, REML = FALSE)
+#summary(m0)$AIC = 368703.5
+#ICC calculation
+variance_components <- as.data.frame(VarCorr(m0))
+between_var <- variance_components$vcov[1]
+within_var <- variance_components$vcov[2]
+icc <- between_var / (between_var + within_var)
+#ICC = 0.09 || ICC = 0.06981 / (0.06981+0.65151)
+
+m1 <- lmer(NukeOptimism ~ Age + as.factor(Education) + as.factor(Gender) + 
+             as.factor(INCOME_5) + (1 | Country), 
+           data=mydata, REML = FALSE)
+#summary(m1)$AIC = 366017.4
+
+m2 <- lmer(NukeOptimism ~ Age + as.factor(Education) + as.factor(Gender) + 
+             as.factor(CountryIncomeLevel) + (1 | Country), 
+           data=mydata, REML = FALSE)
+#summary(m2)$AIC = 368678.7
+
+m3 <- lmer(NukeOptimism ~ Age + as.factor(Education) + as.factor(Gender) + 
+             as.factor(NuclearCountry) + (1 | Country), 
+           data=mydata, REML = FALSE)
+#summary(m3)$AIC = 368703.8
+
+m4 <- lmer(NukeOptimism ~ Age + as.factor(Education) + as.factor(Gender) + 
+             as.factor(CountryIncomeLevel) + as.factor(INCOME_5) + as.factor(NuclearCountry) + (1 | Country), 
+           data=mydata, REML = FALSE)
+#summary(m4)$AIC = 365983.1
+
+#AIC comparison using AICcmodavg package: recommendation = fullest model, despite income quintiles not yielding significant betas
+models <- list(m0,m1,m2,m3,m4)
+model.names <- c("basic","+income","+WorldBank","+CivilNuke","+everything")
+AICcmodavg::aictab(cand.set = models, modnames = model.names)
+
+#Full model R-squared = 0.11
+performance::r2(m4)
+
+#msummary table for base model
+msummary(m4, estimate = "{estimate}{stars}",
+         statistic = NULL, title = "Controls-only Model", 
+         coef_rename = c("as.factor(Gender)2"="Female gender (vs male)",
+                         "as.factor(Education)2"="High school education (vs primary school)",
+                         "as.factor(Education)3"="College education (vs primary school)",
+                         "as.factor(CountryIncomeLevel)2"="Lower-middle income country (vs lower-income)",
+                         "as.factor(CountryIncomeLevel)3"="Upper-middle income country (vs lower-income)",
+                         "as.factor(CountryIncomeLevel)4"="Upper income country (vs lower-income)",
+                         "as.factor(INCOME_5)2" = "2nd income quintile (vs 1st)",
+                         "as.factor(INCOME_5)3" = "3rd income quintile (vs 1st)",
+                         "as.factor(INCOME_5)4" = "4th income quintile (vs 1st)",
+                         "as.factor(INCOME_5)5" = "5th income quintile (vs 1st)",
+                         "as.factor(NuclearCountry)1" = "Civilian Nuclear Power (vs not)"))
+```
+
+## Base Model Equation
+
+$$ NuclearOptimism_{ij} = \beta_{0j} + \beta_{1j} * Age_{ij} + \beta_{2j} *Education_{ij} + \\ \qquad \qquad \qquad \qquad \quad \beta_{3j} *Gender_{ij} + \beta_{4j} *Income_{ij} + e_{ij} \\
+\beta_{0j} = \gamma_{00} + \gamma_{01}*WorldBank_{j} + \gamma_{02}*CivilianNuclear_{j} + u_{0j} \\
+\beta_{1j} = \gamma_{10} \\
+\beta_{2j} = \gamma_{20} \\
+\beta_{3j} = \gamma_{30} \\
+\beta_{4j} = \gamma_{40}
+$$
+
+## RQ2
+
+```{r RQ2}
+#RQ 2 Climate Change
+
+# Decompose climate change concern into country-means + country-mean-centered
+mydata <- mydata %>% 
+  group_by(Country) %>% 
+  mutate(CCConcern_cm = mean(CCConcern),   # create cluster means
+         CCConcern_cmc = CCConcern - CCConcern_cm) %>%   # cluster-mean-centered
+  ungroup()
+
+#Model nuclear optimism with climate change concern as a random slope, decomposed into country-means and country-mean-cenetered values
+m5 <- lmer(NukeOptimism ~ Age + as.factor(Education) + as.factor(Gender) + 
+             CCConcern_cm + CCConcern_cmc + (CCConcern_cmc | Country) +
+             as.factor(CountryIncomeLevel) + as.factor(INCOME_5) + as.factor(NuclearCountry), 
+           data=mydata, REML = FALSE, control = lmerControl(optimizer = "bobyqa"))
+#summary(m5)
+
+#LRT on climate change concern random slopes
+# model WITH random slopes = m5, deviance = summary(m5)$AIC[4]
+m5.5 <- lmer(NukeOptimism ~ Age + as.factor(Education) + as.factor(Gender) + 
+               CCConcern_cm + CCConcern_cmc + (1 | Country) +
+               as.factor(CountryIncomeLevel) + as.factor(INCOME_5) + as.factor(NuclearCountry), 
+             data=mydata, REML = FALSE, control = lmerControl(optimizer = "bobyqa"))
+# model WITHOUT random slopes = m5.5, deviance = summary(m5.5)$AIC[4]
+
+#LRT = deviance emptier - deviance fuller
+pchisq(unname(summary(m5.5)$AIC[4])-unname(summary(m5)$AIC[4]), df = 2, lower.tail=FALSE) / 2 #df = 2 because of tau0 &, tau1-squared parameters
+#mega-significant! LRT supports inclusion of random slopes
+
+#CC model R-squared = 0.11
+performance::r2(m5)
+
+#Table of coefficients for main models so far
+msummary(list("Base Model" = m4,"Base + Climate Change Concern" = m5), 
+         estimate = "{estimate}{stars}",
+         statistic = NULL, title = "Controls-only vs Climate Change Concern", 
+         coef_rename = c("as.factor(Gender)2"="Female gender (vs male)",
+                         "as.factor(Education)2"="High school education (vs primary school)",
+                         "as.factor(Education)3"="College education (vs primary school)",
+                         "as.factor(CountryIncomeLevel)2"="Lower-middle income country (vs lower-income)",
+                         "as.factor(CountryIncomeLevel)3"="Upper-middle income country (vs lower-income)",
+                         "as.factor(CountryIncomeLevel)4"="Upper income country (vs lower-income)",
+                         "as.factor(INCOME_5)2" = "2nd income quintile (vs 1st)",
+                         "as.factor(INCOME_5)3" = "3rd income quintile (vs 1st)",
+                         "as.factor(INCOME_5)4" = "4th income quintile (vs 1st)",
+                         "as.factor(INCOME_5)5" = "5th income quintile (vs 1st)",
+                         "as.factor(NuclearCountry)1" = "Civilian Nuclear Power (vs not)"))
+```
+
+##RQ3
+
+```{r RQ3}
+#RQ 3 Trust in government safety efficacy
+describe(mydata$GovSafeEff)
+
+# Decompose trust-in-government into country-means + country-mean-centered
+mydata <- mydata %>% 
+  group_by(Country) %>% 
+  mutate(GovSafeEff_cm = mean(GovSafeEff),   # create cluster means
+         GovSafeEff_cmc = GovSafeEff - GovSafeEff_cm) %>%   # cluster-mean-centered
+  ungroup()
+
+#Model nuclear optimism with trust-in-government as a random slope, decomposed into country-means and country-mean-cenetered values
+m6 <- lmer(NukeOptimism ~ Age + as.factor(Education) + as.factor(Gender) + 
+             GovSafeEff_cm + GovSafeEff_cmc + (GovSafeEff_cmc | Country) +
+             as.factor(CountryIncomeLevel) + as.factor(INCOME_5) + as.factor(NuclearCountry), 
+           data=mydata, REML = FALSE, control = lmerControl(optimizer = "bobyqa"))
+#summary(m6)
+
+#LRT on trust-in-government random slopes
+# model WITH random slopes = m6, deviance = summary(m6)$AIC[4]
+m6.5 <- lmer(NukeOptimism ~ Age + as.factor(Education) + as.factor(Gender) + 
+               GovSafeEff_cm + GovSafeEff_cmc + (1 | Country) +
+               as.factor(CountryIncomeLevel) + as.factor(INCOME_5) + as.factor(NuclearCountry), 
+             data=mydata, REML = FALSE, control = lmerControl(optimizer = "bobyqa"))
+# model WITHOUT random slopes = m6.5, deviance = summary(m6.5)$AIC[4]
+
+#LRT = deviance emptier - deviance fuller
+pchisq(unname(summary(m6.5)$AIC[4])-unname(summary(m6)$AIC[4]), df = 2, lower.tail=FALSE) / 2 #df = 2 because of tau0 &, tau1-squared parameters
+#mega-significant! LRT supports inclusion of random slopes
+
+#CC model R-squared = 0.12 -- movin' up in the world
+performance::r2(m6)
+
+#Cross-level interaction between trust-in-government (L1) and whether a country has civilian nuclear power (L2)
+m7 <- lmer(NukeOptimism ~ Age + as.factor(Education) + as.factor(Gender) + 
+             GovSafeEff_cm + GovSafeEff_cmc*as.factor(NuclearCountry) + (GovSafeEff_cmc | Country) +
+             as.factor(CountryIncomeLevel) + as.factor(INCOME_5) + as.factor(NuclearCountry), 
+           data=mydata, REML = FALSE, control = lmerControl(optimizer = "bobyqa"))
+summary(m7)
+#Zero significance, which is a shame, and also surprising? 
+#I expected nuclear-capable countries to differ from non-nuclear countries in terms of how their citizens view government safety
+```
+
+##RQ4
+
+```{r RQ4}
+####################################################################################################
+#RQ 4 Compare models 
+
+#Base model AIC: summary(m4)$AIC = 365983.1 | performance::r2(m4) R2 = 0.11 | n = 151663
+#Climate change random slopes AIC: summary(m5)$AIC = 364666.5 | performance::r2(m5) R2 = 0.11 | n = 151663
+#Trust-in-government random slopes AIC: summary(m6)$AIC = 359945.5 | performance::r2(m6) R2 = 0.12 | n = 149576
+
+#Combo climate change concern + trust-in-government model
+m8 <- lmer(NukeOptimism ~  CCConcern_cm + CCConcern_cmc + GovSafeEff_cm + GovSafeEff_cmc + 
+             (CCConcern_cmc + GovSafeEff_cmc | Country) +
+             Age + as.factor(Education) + as.factor(Gender) + as.factor(CountryIncomeLevel) + 
+             as.factor(NuclearCountry) + as.factor(INCOME_5), 
+           data=mydata, REML = FALSE, control = lmerControl(optimizer = "bobyqa"))
+#summary(m8)$AIC = 358725.0 | performance::r2(m8) R2 = 0.12 | n = 149576
+
+#Kitchen-sink data prep + model
+mydata$Urbanicity <- if_else((mydata$Urbanicity == 9), NA,mydata$Urbanicity)
+mydata <- mydata %>% 
+  mutate(OverallSafetyFeeling = factor(L2, levels = c(1,2,3,98,99), 
+                                       labels = c("More Safe", "Less Safe", "About as Safe", "About as Safe", "About as Safe")))
+mydata <- mydata %>% #GMOs
+  mutate(GMOOptimism = if_else((L4A == 4 | L4A == 98 | L4A == 99),"0",
+                               if_else((L4A == 3),"0",
+                                       if_else((L4A == 2),"-1", "1"))))
+mydata$GMOOptimism <- as.numeric(mydata$GMOOptimism)
+mydata <- mydata %>% #AI
+  mutate(AIOptimism = if_else((L4C == 4 | L4C == 98 | L4C == 99),"0",
+                              if_else((L4C == 3),"0",
+                                      if_else((L4C == 2),"-1", "1"))))
+mydata$AIOptimism <- as.numeric(mydata$AIOptimism)
+mydata$Numeracy <- if_else((mydata$L12 == 3), 1,0)
+mydata$GovSafeResp <- if_else((mydata$L15 == 1), 1,0)
+mydata$SMuse <- if_else((mydata$L26 == 1), 1,0)
+
+#Kitchen-sink model
+m9 <- lmer(NukeOptimism ~  Urbanicity + as.factor(OverallSafetyFeeling) + GMOOptimism +
+             AIOptimism + Numeracy + GovSafeResp + SMuse + Age +
+             as.factor(Education) + as.factor(Gender) + as.factor(CountryIncomeLevel) + 
+             as.factor(NuclearCountry) + as.factor(INCOME_5) + (1|Country), 
+           data=mydata, REML = FALSE, control = lmerControl(optimizer = "bobyqa"))
+#summary(m9)$AIC = 344541.1 | performance::r2(m9) R2 = 0.18 | n = 148547
+
+#Combo + best findings from kitchen-sink approach -- FINAL MODEL
+mFinal <- lmer(NukeOptimism ~  CCConcern_cm + CCConcern_cmc + GovSafeEff_cm + GovSafeEff_cmc + 
+                 (CCConcern_cmc + GovSafeEff_cmc | Country) + GMOOptimism + 
+                 AIOptimism + as.factor(NuclearCountry) + as.factor(Education) + as.factor(Gender) + 
+                 as.factor(CountryIncomeLevel) + Age + as.factor(INCOME_5), 
+               data=mydata, REML = FALSE, control = lmerControl(optimizer = "bobyqa"))
+#summary(mFinal)$AIC = 346069.2 | performance::r2(mFinal) R2 = 0.18 | n = 149576
+#NOTE: msummary breaks for models with multiple random slopes, thus I build a final-model output table by hand
+merTools::RMSE.merMod(mFinal) #RMSE = 0.77
+
+#AIC comparison using AICcmodavg package: recommendation = kitchen-sink model, but I think it's important to keep the novel predictors
+models <- list(m4,m5,m6,m9,mFinal)
+model.names <- c("base","+CCconcern","+TrustInGov","+KitchenSink","Final")
+AICcmodavg::aictab(cand.set = models, modnames = model.names)
+
+#Re-run final model with binary paramterization of DV / logit link function
+#Start with glmmTMB
+mFB_glmmTMB <- glmmTMB(NukeBinary ~  CCConcern_cm + CCConcern_cmc + GovSafeEff_cm + GovSafeEff_cmc + 
+                     (CCConcern_cmc + GovSafeEff_cmc | Country) + GMOOptimism + 
+                     AIOptimism + as.factor(NuclearCountry) + as.factor(Education) + as.factor(Gender) + 
+                     as.factor(CountryIncomeLevel) + Age + as.factor(INCOME_5), 
+                   data=mydata, family = binomial("logit"))
+summary(mFB_glmmTMB)
+#summary(mFB_glmmTMB)$AIC = 170084.91 | performance::r2(mFB_glmmTMB) R2 = 0.22 | n = 149576
+
+msummary(mFB_glmmTMB, output = "glmmTMBFinal.jpg",
+         estimate = "{estimate}{stars}",
+         statistic = NULL, title = "Binary Reparamaterization of Final Model", 
+         coef_rename = c("as.factor(Gender)2"="Female gender (vs male)",
+                         "as.factor(Education)2"="High school education (vs primary school)",
+                         "as.factor(Education)3"="College education (vs primary school)",
+                         "as.factor(CountryIncomeLevel)2"="Lower-middle income country (vs lower-income)",
+                         "as.factor(CountryIncomeLevel)3"="Upper-middle income country (vs lower-income)",
+                         "as.factor(CountryIncomeLevel)4"="Upper income country (vs lower-income)",
+                         "as.factor(INCOME_5)2" = "2nd income quintile (vs 1st)",
+                         "as.factor(INCOME_5)3" = "3rd income quintile (vs 1st)",
+                         "as.factor(INCOME_5)4" = "4th income quintile (vs 1st)",
+                         "as.factor(INCOME_5)5" = "5th income quintile (vs 1st)",
+                         "as.factor(NuclearCountry)1" = "Civilian Nuclear Power (vs not)"))
+
+#Cross-check with glmer
+mFB_glmer <- glmer(NukeBinary ~  CCConcern_cm + CCConcern_cmc + GovSafeEff_cm + GovSafeEff_cmc + 
+                        (CCConcern_cmc + GovSafeEff_cmc | Country) + GMOOptimism + 
+                        AIOptimism + as.factor(NuclearCountry) + as.factor(Education) + as.factor(Gender) + 
+                        as.factor(CountryIncomeLevel) + Age + as.factor(INCOME_5), 
+                      data=mydata, family = binomial, control = glmerControl(optimizer = "bobyqa"))
+#summary(mFB_glmer)
+msummary(mFB_glmer, output = "glmerFinal.jpg",
+         estimate = "{estimate}{stars}",
+         statistic = NULL, title = "Binary Reparamaterization of Final Model", 
+         coef_rename = c("as.factor(Gender)2"="Female gender (vs male)",
+                         "as.factor(Education)2"="High school education (vs primary school)",
+                         "as.factor(Education)3"="College education (vs primary school)",
+                         "as.factor(CountryIncomeLevel)2"="Lower-middle income country (vs lower-income)",
+                         "as.factor(CountryIncomeLevel)3"="Upper-middle income country (vs lower-income)",
+                         "as.factor(CountryIncomeLevel)4"="Upper income country (vs lower-income)",
+                         "as.factor(INCOME_5)2" = "2nd income quintile (vs 1st)",
+                         "as.factor(INCOME_5)3" = "3rd income quintile (vs 1st)",
+                         "as.factor(INCOME_5)4" = "4th income quintile (vs 1st)",
+                         "as.factor(INCOME_5)5" = "5th income quintile (vs 1st)",
+                         "as.factor(NuclearCountry)1" = "Civilian Nuclear Power (vs not)"))
+
+#Exactly the same outputs from glmmTMB and glmer -- good sign!
+
+#Attempted to re-run the model using brms package, but R couldn't handle it (canceled code after 60 minutes of run time)
+#mFB_TMB <- brm(NukeBinary ~  CCConcern_cm + CCConcern_cmc + GovSafeEff_cm + GovSafeEff_cmc + 
+#                     (CCConcern_cmc + GovSafeEff_cmc | Country) + GMOOptimism + 
+#                     AIOptimism + as.factor(NuclearCountry) + as.factor(Education) + as.factor(Gender) + 
+#                     as.factor(CountryIncomeLevel) + Age + as.factor(INCOME_5), 
+#                   data=mydata, family = bernoulli("logit"), seed = 42)
+```
+
+## Final Model Equation
+
+$$ NuclearOptimism_{ij} = \beta_{0j} + \beta_{1j} * ClimateConcernCMC_{ij} + \beta_{2j} *TrustGovCMC_{ij} + \\ 
+\beta_{3j} *AIOptimism_{ij} + \beta_{4j} *GMOOptimism_{ij} + \\ 
+\beta_{5j} * Education_{ij} + \beta_{6j} * Age_{ij} + \beta_{7j} * Gender_{ij} + \beta_{8j} * PersonalIncome_{ij} + e_{ij} \\
+\beta_{0j} = \gamma_{00} + \gamma_{01}*ClimateConcernCM_{j} + \gamma_{02}*TrustGovCM_{j} + \\
+\gamma_{03}*WorldBank_{j}+ \gamma_{04}*CivilianNuclearPower_{j} + u_{0j} \\
+\beta_{1j} = \gamma_{10} + u_{1j}\\ 
+\beta_{2j} = \gamma_{20} + u_{2j}\\ 
+\beta_{3j} = \gamma_{30} \quad \beta_{4j} = \gamma_{40} \quad \beta_{5j} = \gamma_{50} \\
+\beta_{6j} = \gamma_{60} \quad \beta_{7j} = \gamma_{70} \quad \beta_{8j} = \gamma_{80}  \\
+Var(u_{0j}) = \tau^2_{0}  \quad Var(u_{1j}) = \tau^2_{1}  \quad Var(u_{2j}) = \tau^2_{2}     \\
+\begin{pmatrix} u_{0j} \\ u_{1j} \\ u_{2j} \end{pmatrix} 
+\sim N \begin{pmatrix} \begin{bmatrix} 0 \\ 0 \\ 0 \end{bmatrix}, 
+                    \begin{bmatrix} \tau^2_{0} & \tau_{01} & \tau_{02} \\ 
+                    \tau_{01} & \tau^2_{1} & \tau_{12} \\
+                    \tau_{02} & \tau_{12} & \tau^2_{2}
+                    \end{bmatrix} \end{pmatrix} \\ 
+e_i \sim N(0, \sigma)
+$$
+
+
+##Graphics
+
+```{r graphics}
+#GRAPHICS
+GlobalNukeBinary <- mydata %>%
+  group_by(Country) %>%
+  summarise(mean = weighted.mean(NukeBinary, WGT), n = n())
+
+GlobalNukeTrinary <- mydata %>%
+  group_by(Country) %>%
+  summarise(mean = weighted.mean(NukeOptimism,WGT), n = n())
+
+#View(GlobalNukeBinary)
+#Global mean using weighted average = 40% of people globally who are optimistic for nuclear power
+summarise(mydata,weighted.mean(NukeBinary,projection_weight),n = n())
+
+#reference final model
+#lmer(NukeOptimism ~  CCConcern_cm + CCConcern_cmc + GovSafeEff_cm + GovSafeEff_cmc + 
+#                 (CCConcern_cmc + GovSafeEff_cmc | Country) + GMOOptimism + 
+#                 AIOptimism + as.factor(NuclearCountry) + as.factor(Education) + as.factor(Gender) + 
+#                 as.factor(CountryIncomeLevel) + Age + as.factor(INCOME_5))
+
+#Marginal model plots to check linearity assumption of climate change and trust-in-government variables
+augment(mFinal) %>%
+  ggplot(aes(x = CCConcern_cmc, y = NukeOptimism)) +
+  geom_point(size = 0.7, alpha = 0.3) +
+  geom_smooth(col = "blue", se = FALSE) + # blue line from data
+  geom_smooth(aes(y = .fitted),
+              col = "red",
+              se = FALSE, linetype = "dashed")
+augment(mFinal) %>%
+  ggplot(aes(x = GovSafeEff_cmc, y = NukeOptimism)) +
+  geom_point(size = 0.7, alpha = 0.3) +
+  geom_smooth(col = "blue", se = FALSE) + # blue line from data
+  geom_smooth(aes(y = .fitted),
+              col = "red",
+              se = FALSE, linetype = "dashed")
+
+#Cluster residual plots to test equal variance of errors across clusters
+Country1 <- c("Afghanistan","Albania","Algeria","Argentina","Armenia","Australia","Austria","Azerbaijan","Bahrain","Bangladesh","Belarus",
+              "Belgium","Benin","Bolivia","Bosnia Herzegovina","Botswana","Brazil","Bulgaria","Burkina Faso","Cambodia","Cameroon",
+              "Canada","Chad","Chile","China","Colombia","Congo Brazzaville","Costa Rica","Croatia","Cyprus","Denmark","Dominican Republic",
+              "Ecuador","Egypt","El Salvador","Estonia")
+Country2 <- c("Eswatini",	"Ethiopia",	"Finland",	"France",	"Gabon",	"Gambia"	,"Georgia",
+              "Germany"	,"Ghana"	,"Greece"	,"Guatemala"	,"Guinea"	,"Honduras"	,"Hong Kong",
+              "Hungary",	"India",	"Indonesia"	,"Iran"	,"Iraq"	,"Ireland",	"Israel"	,
+              "Italy"	,"Ivory Coast",	"Jamaica",	"Japan"	,"Jordan"	,"Kazakhstan"	,
+              "Kenya"	,"Kosovo"	,"Kuwait"	,"Kyrgyzstan"	,"Laos"	,"Latvia"	,"Lebanon",
+              "Lesotho"	,"Liberia")
+Country3 <- c("Libya",	"Lithuania"	,"Luxembourg"	,"Madagascar"	,"Malawi",	"Malaysia",
+              "Mali",	"Malta"	,"Mauritania"	,"Mauritius",	"Mexico",	"Moldova"	,"Mongolia"	,
+              "Montenegro",	"Morocco"	,"Mozambique"	,"Myanmar"	,"Namibia"	,"Nepal",
+              "Netherlands",	"New Zealand",	"Nicaragua"	,"Niger",	"Nigeria",
+              "North Macedonia"	,"Norway",	"Pakistan",	"Palestine"	,"Panama",
+              "Paraguay",	"Peru",	"Philippines",	"Poland",	"Portugal"	,"Romania",
+              "Russia",	"Rwanda")
+Country4 <- c("Saudi Arabia",	"Senegal"	,"Serbia",	"Sierra Leone"	,"Singapore",
+              "Slovakia",	"Slovenia",	"South Africa",	"South Korea",	"Spain"	,
+              "Sri Lanka",	"Sweden",	"Switzerland"	,"Taiwan"	,"Tajikistan"	,"Tanzania",
+              "Thailand",	"Togo",	"Tunisia",	"Turkey",	"Turkmenistan",	"Uganda",
+              "Ukraine",	"United Arab Emirates",	"United Kingdom",	"United States",
+              "Uruguay",	"Uzbekistan",	"Venezuela",	"Vietnam"	,"Yemen",	"Zambia",	"Zimbabwe")
+augment(mFinal) %>%
+  filter(Country %in% Country1) %>%
+  ggplot(aes(x = factor(Country), y = .resid), 
+         position=position_dodge(1)) +
+  geom_boxplot() +
+  coord_flip() 
+augment(mFinal) %>%
+  filter(Country %in% Country2) %>%
+  ggplot(aes(x = factor(Country), y = .resid), 
+         position=position_dodge(1)) +
+  geom_boxplot() +
+  coord_flip() 
+augment(mFinal) %>%
+  filter(Country %in% Country3) %>%
+  ggplot(aes(x = factor(Country), y = .resid), 
+         position=position_dodge(1)) +
+  geom_boxplot() +
+  coord_flip() 
+augment(mFinal) %>%
+  filter(Country %in% Country4) %>%
+  ggplot(aes(x = factor(Country), y = .resid), 
+         position=position_dodge(1)) +
+  geom_boxplot() +
+  coord_flip() 
+
+#Normality of residuals
+qqmath(mFinal)
+
+#Illustrate variability in nuclear optimism across main predictor IVs
+augment(m5, data = mydata) %>%
+  ggplot(aes(x = CCConcern, y = NukeOptimism, color = factor(Country))) +
+  geom_point(size = 0.2, alpha = 0.2) +
+  geom_smooth(aes(y = .fitted),
+              method = "lm", se = FALSE, size = 0.5) +
+  stat_summary(aes(x = CCConcern_cm, y = .fitted,
+                   fill = factor(Country)),
+               color = "red", 
+               fun = mean, 
+               geom = "point",
+               shape = 24,
+               size = 2.5) +
+  geom_smooth(aes(x = CCConcern_cm, y = .fitted),
+              method = "lm", se = FALSE,
+              color = "black") +
+  labs(y = "Nuclear Optimism") +
+  guides(color = "none", fill = "none")
+
+augment(m6, data = mydata) %>%
+  ggplot(aes(x = GovSafeEff, y = NukeOptimism, color = factor(Country))) +
+  geom_point(size = 0.2, alpha = 0.2) +
+  geom_smooth(aes(y = .fitted),
+              method = "lm", se = FALSE, size = 0.5) +
+  stat_summary(aes(x = GovSafeEff_cm, y = .fitted,
+                   fill = factor(Country)),
+               color = "red", 
+               fun = mean, 
+               geom = "point",
+               shape = 24,
+               size = 2.5) +
+  geom_smooth(aes(x = GovSafeEff_cm, y = .fitted),
+              method = "lm", se = FALSE,
+              color = "black") +
+  labs(y = "Nuclear Optimism", x = "Trust in Government") +
+  guides(color = "none", fill = "none")
+
+
+#Unused 
+#mFinal %>%
+#  augment(data = mydata) %>%
+#  ggplot(aes(
+#    x = GovSafeEff, y = .fitted, group = factor(Country),
+#    color = factor(CountryIncomeLevel)  # use `sector` for coloring lines)) +
+#  geom_smooth(method = "lm", se = FALSE, size = 0.5) +
+#  labs(y = "Predicted Nuclear Optimism", color = "NuclearCountry")
+```
